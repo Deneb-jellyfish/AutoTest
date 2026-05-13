@@ -1,0 +1,5 @@
+id,requirement
+REQ-001,The system shall allow a user to log in with username and password. If the password is incorrect 3 times consecutively, the account must be locked for 10 minutes.
+REQ-002,When creating a to-do item, the title length must be <= 50 characters and the due_date must not be earlier than today. The system should show a validation error for invalid input.
+REQ-003,The system shall allow a user to mark a to-do item as completed. When an item is completed, it should no longer appear in the default "Active" list.
+
