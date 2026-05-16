@@ -1,0 +1,36 @@
+{
+  "project_meta": {
+    "project_name": "To-Do List App 测试设计",
+    "target_app": "To-Do List Web Application",
+    "created_at": "2026-05-14T00:00:00",
+    "last_modified": "2026-05-14T00:00:00"
+  },
+  "requirements": [
+    {
+      "requirement_id": "REQ-001",
+      "req_id": "REQ-001",
+      "title": "创建任务及输入验证",
+      "raw_text": "用户可以在输入框中输入任务标题并点击添加按钮创建任务，任务标题不能为空，系统应自动去除标题前后的空格，标题长度必须在1到50个字符之间；如果用户输入为空、全为空格或超过50个字符，系统应拒绝添加并显示错误提示。",
+      "source": "manual_input",
+      "source_annotations": [
+        {
+          "text": "用户可以在输入框中输入任务标题并点击添加按钮创建任务",
+          "category": "source"
+        }
+      ],
+      "tags": [
+        "validation",
+        "core"
+      ],
+      "priority": "High",
+      "review_status": "Imported",
+      "notes": "",
+      "created_at": "2026-05-14T00:00:00"
+    }
+  ],
+  "parsed_requirements": [],
+  "risk_items": [],
+  "coverage_items": [],
+  "strategy_items": [],
+  "audit_log": []
+}
