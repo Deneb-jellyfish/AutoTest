@@ -1,0 +1,73 @@
+spring:
+  application:
+    name: auth-sut
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${app.remote.host}:5432/zdmj?currentSchema=public&stringtype=unspecified&TimeZone=Asia/Shanghai
+    username: your-postgres-user
+    password: your-postgres-password
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:${REDIS_HOST:${app.remote.host}}}
+      port: ${SPRING_DATA_REDIS_PORT:${REDIS_PORT:6379}}
+      password: ${SPRING_DATA_REDIS_PASSWORD:${REDIS_PASSWORD:your-redis-password}}
+      timeout: 10000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+        shutdown-timeout: 200ms
+
+  mail:
+    host: smtp.163.com
+    port: 465
+    username: your-mail-username
+    password: your-mail-password
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+            required: true
+          starttls:
+            enable: false
+            required: false
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/**/*.xml
+  type-aliases-package: com.zdmj
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+server:
+  port: 8081
+
+api:
+  prefix: /api/zdmj
+
+jwt:
+  secret: change-me-to-match-main-zdmj-jwt-secret
+  expire-days: 7
+
+app:
+  remote:
+    host: your-server-ip
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.zdmj: DEBUG
