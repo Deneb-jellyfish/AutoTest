@@ -10,8 +10,14 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173
-    // API 直连远程：见 .env 中 VITE_API_BASE
-    // 若改回本地 SUT 后端，可设 VITE_API_BASE=/api/zdmj 并恢复 proxy 到 localhost:8081
+    port: 5173,
+    // 经 dev server 代理，避免浏览器直连远程时的 CORS 冲突（nginx 与 Spring 重复 CORS 头）
+    proxy: {
+      '/api/zdmj': {
+        target: 'http://111.229.81.45',
+        changeOrigin: true
+      }
+    }
+    // 本地 SUT 后端：将 target 改为 http://localhost:8081
   }
 });
