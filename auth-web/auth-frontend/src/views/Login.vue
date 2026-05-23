@@ -9,8 +9,8 @@ const message = useMessage();
 const loading = ref(false);
 
 const model = reactive({
-  usernameOrEmail: '3516039373@qq.com',
-  password: '654321'
+  usernameOrEmail: '',
+  password: ''
 });
 
 async function handleSubmit() {
@@ -47,14 +47,5 @@ async function handleSubmit() {
         <NButton quaternary block @click="router.push('/reset-password')">忘记密码</NButton>
       </NSpace>
     </NForm>
-    <p class="hint">API：远程服务器 111.229.81.45（与主站后端相同）</p>
   </NCard>
 </template>
-
-<style scoped>
-.hint {
-  margin: 16px 0 0;
-  font-size: 12px;
-  color: #888;
-}
-</style>

@@ -1,7 +1,7 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import type { ApiResult } from './types';
 
-const baseURL = import.meta.env.VITE_API_BASE || '/api';
+const baseURL = import.meta.env.VITE_API_BASE || '/api/zdmj';
 
 const instance = axios.create({
   baseURL,

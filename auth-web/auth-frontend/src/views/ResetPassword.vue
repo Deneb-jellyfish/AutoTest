@@ -31,7 +31,7 @@ async function sendCode() {
     message.error(error);
     return;
   }
-  message.success('验证码已发送，请在 MailHog 查看');
+  message.success('验证码已发送，请查收邮件');
   countdown.value = 60;
   const timer = setInterval(() => {
     countdown.value -= 1;
