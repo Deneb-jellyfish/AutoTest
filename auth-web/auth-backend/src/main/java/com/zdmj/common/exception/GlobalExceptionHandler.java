@@ -164,7 +164,8 @@ public class GlobalExceptionHandler {
             // 处理日期格式错误
             if (message.contains("LocalDate") || message.contains("LocalDateTime")) {
                 log.warn("日期格式错误: {}", message);
-                return Result.error(ErrorCode.DATE_FORMAT_ERROR.getCode(), ErrorCode.DATE_FORMAT_ERROR.getMessage());
+                return Result.error(ErrorCode.VALIDATION_ERROR.getCode(),
+                        ErrorCode.VALIDATION_ERROR.getMessage() + ": 日期格式错误");
             }
             // 处理JSON反序列化失败
             if (message.contains("Cannot deserialize")) {

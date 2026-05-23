@@ -7,3 +7,4 @@ venv/
 *.pyc
 
 auth-web/auth-backend/src/main/resources/application.yml
+/auth-web/auth-backend/target

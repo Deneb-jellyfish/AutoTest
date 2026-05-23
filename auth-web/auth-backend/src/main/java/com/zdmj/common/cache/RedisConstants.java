@@ -1,10 +1,14 @@
 package com.zdmj.common.cache;
 
 public class RedisConstants {
-    // 验证码前缀
+    // 验证码前缀（后接用途 register / reset 与邮箱）
     public static final String VERIFICATION_CODE_KEY = "verification:code:";
-    // 验证码过期时间（分钟）
+    // 验证码过期时间（秒）
     public static final int CODE_EXPIRE_TTL = 10 * 60;
+
+    public static String verificationCodeKey(String purposeSuffix, String email) {
+        return VERIFICATION_CODE_KEY + purposeSuffix + ":" + email;
+    }
 
     // 会话缓存前缀
     public static final String CONVERSATION_KEY = "conversation:";
