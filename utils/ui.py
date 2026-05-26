@@ -153,7 +153,9 @@ def render_workflow_sidebar(current_label: str) -> None:
         ("Structuring & Review", "pages/2_Structured_Requirement_Review.py"),
         ("Risk Assessment", "pages/3_Risk_Assessment.py"),
         ("Coverage & Strategy", "pages/4_Coverage_Planning.py"),
-        ("Persistence & Export", "pages/5_Export.py"),
+        ("Suite Detail Design", "pages/6_Suite_Detail_Design.py"),
+        ("Test Cases", "pages/5_Test_Case_Workspace.py"),
+        ("Persistence & Export", "pages/7_Optimization_and_Export.py"),
     ]
     st.markdown("### AutoTestDesign Workflow")
     for label, target in items:

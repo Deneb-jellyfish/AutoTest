@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,11 @@ STRUCTURED_BATCH_PROMPT = """
 - 不要拆出不存在的需求，也不要合并不同 requirement
 - source_annotations 只能引用原始需求里的原文片段
 - 如果需求里信息不足，可以放到 assumptions 或 ambiguities
+- 绝对不要输出 Markdown、解释文字、注释、前后缀说明
+- 绝对不要使用 ```json 代码块
+- 返回内容必须是合法 JSON，所有字符串都必须用双引号包裹
+- 如果某个字段没有内容，字符串字段返回 ""，列表字段返回 []
+- input_fields、source_annotations、business_rules、preconditions、conditions、expected_result、error_handling、assumptions、ambiguities 必须始终存在
 
 请只返回 JSON 数组，格式如下：
 [
@@ -70,6 +76,77 @@ CATEGORY_COLORS = {
 
 def should_protect(parsed_req: Dict[str, Any]) -> bool:
     return parsed_req.get("review_status") == "Approved"
+
+
+def _strip_code_fences(text: str) -> str:
+    value = text.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", value)
+        value = re.sub(r"\s*```$", "", value)
+    return value.strip()
+
+
+def _extract_json_array(text: str) -> Any:
+    candidate = _strip_code_fences(text)
+    try:
+        return json.loads(candidate)
+    except Exception:
+        match = re.search(r"\[\s*\{.*\}\s*\]", candidate, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _build_structured_payload(requirements: List[Dict[str, Any]]) -> str:
+    return json.dumps(
+        {
+            "requirements": [
+                {
+                    "requirement_id": item["requirement_id"],
+                    "title": item.get("title", ""),
+                    "raw_text": item["raw_text"],
+                    "priority": item.get("priority", "Medium"),
+                    "source": item.get("source", ""),
+                }
+                for item in requirements
+            ]
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _structured_batch_chat(requirements: List[Dict[str, Any]], llm_client: LlmClient, retry_hint: str = "") -> List[Dict[str, Any]]:
+    prompt = STRUCTURED_BATCH_PROMPT
+    if retry_hint:
+        prompt = (
+            f"{STRUCTURED_BATCH_PROMPT}\n\n"
+            "上一次输出不是合法 JSON，请严格修正。\n"
+            f"错误提示：{retry_hint}\n"
+            "再次强调：只返回 JSON 数组本身，不要返回任何其他文字。"
+        )
+    raw_response = llm_client.chat(
+        system=prompt,
+        user=_build_structured_payload(requirements),
+        temperature=0.0,
+        max_tokens=4000,
+    )
+    parsed = _extract_json_array(raw_response)
+    if not isinstance(parsed, list):
+        snippet = raw_response[:280].replace("\n", " ")
+        raise ValueError(f"LLM must return a JSON list. Raw response snippet: {snippet}")
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _structured_requirements_from_llm_batch_once(requirements: List[Dict[str, Any]], llm_client: LlmClient) -> List[Dict[str, Any]]:
+    parse_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            retry_hint = "" if attempt == 0 else str(parse_error)
+            return _structured_batch_chat(requirements, llm_client, retry_hint=retry_hint)
+        except Exception as exc:
+            parse_error = exc
+    raise ValueError(f"Batch structured parsing failed after retry: {parse_error}")
 
 
 def render_annotated_text(raw_text: str, annotations: List[Dict[str, Any]]) -> str:
@@ -183,22 +260,50 @@ def _structured_requirements_from_llm_batch(requirements: List[Dict[str, Any]], 
     if not llm_client.enabled:
         raise RuntimeError("Structured requirement parsing requires a configured LLM.")
 
-    payload = {
-        "requirements": [
-            {
-                "requirement_id": item["requirement_id"],
-                "title": item.get("title", ""),
-                "raw_text": item["raw_text"],
-                "priority": item.get("priority", "Medium"),
-                "source": item.get("source", ""),
-            }
-            for item in requirements
-        ]
-    }
-    result = llm_client.json_any_completion(STRUCTURED_BATCH_PROMPT, json.dumps(payload, ensure_ascii=False, indent=2))
-    if not isinstance(result, list):
-        raise ValueError("LLM must return a JSON list for structured requirements.")
-    return [item for item in result if isinstance(item, dict)]
+    if len(requirements) <= 2:
+        try:
+            result = _structured_requirements_from_llm_batch_once(requirements, llm_client)
+            returned_ids = {str(item.get("requirement_id", "")).strip() for item in result}
+            expected_ids = {item["requirement_id"] for item in requirements}
+            if expected_ids.issubset(returned_ids):
+                return result
+        except Exception:
+            pass
+
+    if len(requirements) > 1:
+        try:
+            result = _structured_requirements_from_llm_batch_once(requirements, llm_client)
+            returned_ids = {str(item.get("requirement_id", "")).strip() for item in result}
+            expected_ids = {item["requirement_id"] for item in requirements}
+            if expected_ids.issubset(returned_ids):
+                return result
+        except Exception as batch_exc:
+            batch_error = batch_exc
+        else:
+            batch_error = ValueError("LLM batch response missing one or more requirement_id values.")
+    else:
+        batch_error = None
+
+    merged_results: List[Dict[str, Any]] = []
+    individual_errors: List[str] = []
+    for requirement in requirements:
+        try:
+            rows = _structured_requirements_from_llm_batch_once([requirement], llm_client)
+            if not rows:
+                raise ValueError("LLM returned an empty list.")
+            merged_results.append(rows[0])
+        except Exception as exc:
+            individual_errors.append(f"{requirement['requirement_id']}: {exc}")
+
+    if len(merged_results) != len(requirements):
+        message_parts = []
+        if batch_error:
+            message_parts.append(f"batch_error={batch_error}")
+        if individual_errors:
+            message_parts.append(f"individual_errors={' | '.join(individual_errors)}")
+        raise ValueError("Structured parsing failed. " + " ; ".join(message_parts))
+
+    return merged_results
 
 
 def parse_requirements_with_report(

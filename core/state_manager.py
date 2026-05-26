@@ -11,6 +11,49 @@ from utils.persistence import load_from_db, save_to_db
 PROJECT_STATE_KEY = "project_state"
 
 
+def _next_prefixed_id(existing_ids: set[str], prefix: str) -> str:
+    numbers = []
+    for raw_value in existing_ids:
+        if raw_value.startswith(f"{prefix}-"):
+            suffix = raw_value.split("-", 1)[1]
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+    next_num = max(numbers, default=0) + 1
+    candidate = f"{prefix}-{next_num:03d}"
+    while candidate in existing_ids:
+        next_num += 1
+        candidate = f"{prefix}-{next_num:03d}"
+    return candidate
+
+
+def _normalize_parsed_requirement_ids(ps: Dict[str, Any]) -> None:
+    seen_ids: set[str] = set()
+
+    for parsed in ps.get("parsed_requirements", []):
+        old_parsed_id = str(parsed.get("parsed_id", "")).strip()
+        req_id = str(parsed.get("req_id") or parsed.get("requirement_id") or "").strip()
+
+        if old_parsed_id and old_parsed_id not in seen_ids:
+            seen_ids.add(old_parsed_id)
+            continue
+
+        new_parsed_id = _next_prefixed_id(seen_ids, "PR")
+        parsed["parsed_id"] = new_parsed_id
+        seen_ids.add(new_parsed_id)
+
+        for risk_item in ps.get("risk_items", []):
+            if risk_item.get("parsed_id") == old_parsed_id and risk_item.get("req_id") == req_id:
+                risk_item["parsed_id"] = new_parsed_id
+
+        for coverage_item in ps.get("coverage_items", []):
+            if coverage_item.get("parsed_id") == old_parsed_id and coverage_item.get("req_id") == req_id:
+                coverage_item["parsed_id"] = new_parsed_id
+
+        for row in ps.get("traceability_matrix", []):
+            if row.get("structured_requirement_id") == old_parsed_id and row.get("requirement_id") == req_id:
+                row["structured_requirement_id"] = new_parsed_id
+
+
 def _normalize_loaded_state(ps: Dict[str, Any]) -> Dict[str, Any]:
     for req in ps.get("requirements", []):
         req_id = req.get("requirement_id") or req.get("req_id")
@@ -42,6 +85,39 @@ def _normalize_loaded_state(ps: Dict[str, Any]) -> Dict[str, Any]:
         parsed.setdefault("source_annotations", parsed.get("evidence_annotations", []))
         parsed.setdefault("rationale", "")
         parsed.setdefault("review_status", "Proposed")
+
+    for test_case in ps.get("test_cases", []):
+        test_case.setdefault("requirement_id", "")
+        test_case.setdefault("coverage_id", "")
+        test_case.setdefault("strategy_id", "")
+        test_case.setdefault("title", "")
+        test_case.setdefault("objective", "")
+        test_case.setdefault("technique", "EP")
+        test_case.setdefault("suite_ids", [])
+        test_case.setdefault("preconditions", [])
+        test_case.setdefault("test_data", {})
+        test_case.setdefault("steps", [])
+        test_case.setdefault("expected_result", [])
+        test_case.setdefault("priority", "Medium")
+        test_case.setdefault("execution_type", "Manual")
+        test_case.setdefault("status", "Not Run")
+        test_case.setdefault("review_status", "Proposed")
+        test_case.setdefault("last_edited_by", "rule")
+
+    for suite in ps.get("test_suites", []):
+        suite.setdefault("suite_id", "")
+        suite.setdefault("name", "")
+        suite.setdefault("priority", "Medium")
+        suite.setdefault("requirement_ids", [])
+        suite.setdefault("selected_techniques", [])
+        suite.setdefault("notes", "")
+        suite.setdefault("last_edited_by", "system")
+
+    for coverage_item in ps.get("coverage_items", []):
+        coverage_item.setdefault("suite_ids", [])
+
+    _normalize_parsed_requirement_ids(ps)
+    ps.setdefault("traceability_matrix", [])
     return ps
 
 
@@ -115,6 +191,14 @@ def generate_strategy_id(ps: Dict[str, Any]) -> str:
     return generate_next_id(ps["strategy_items"], "strategy_id", "STR")
 
 
+def generate_test_case_id(ps: Dict[str, Any]) -> str:
+    return generate_next_id(ps["test_cases"], "test_case_id", "TC")
+
+
+def generate_suite_id(ps: Dict[str, Any]) -> str:
+    return generate_next_id(ps["test_suites"], "suite_id", "TS")
+
+
 def find_by_id(items: Iterable[Dict[str, Any]], field_name: str, object_id: str) -> Optional[Dict[str, Any]]:
     for item in items:
         if item.get(field_name) == object_id:
@@ -148,3 +232,11 @@ def find_coverage(ps: Dict[str, Any], cov_id: str) -> Optional[Dict[str, Any]]:
 
 def find_strategy_by_cov(ps: Dict[str, Any], cov_id: str) -> Optional[Dict[str, Any]]:
     return find_by_id(ps["strategy_items"], "cov_id", cov_id)
+
+
+def find_test_case(ps: Dict[str, Any], test_case_id: str) -> Optional[Dict[str, Any]]:
+    return find_by_id(ps["test_cases"], "test_case_id", test_case_id)
+
+
+def find_suite(ps: Dict[str, Any], suite_id: str) -> Optional[Dict[str, Any]]:
+    return find_by_id(ps["test_suites"], "suite_id", suite_id)

@@ -66,7 +66,7 @@ render_hero(
 )
 
 meta = ps["project_meta"]
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("需求数", len(ps["requirements"]))
 with col2:
@@ -75,6 +75,8 @@ with col3:
     st.metric("风险项", len(ps["risk_items"]))
 with col4:
     st.metric("覆盖项", len(ps["coverage_items"]))
+with col5:
+    st.metric("测试用例", len(ps.get("test_cases", [])))
 
 st.info(
     f"当前项目：`{meta['project_name']}` | 目标应用：`{meta['target_app']}` | "
@@ -89,6 +91,7 @@ st.markdown(
     - `2_Structured_Requirement_Review`
     - `3_Risk_Assessment`
     - `4_Coverage_Planning`
-    - `5_Export`
+    - `5_Test_Case_Workspace`
+    - `7_Optimization_and_Export`
     """
 )

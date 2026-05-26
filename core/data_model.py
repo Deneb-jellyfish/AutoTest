@@ -8,6 +8,9 @@ from typing import Any, Dict, List
 RAW_REQUIREMENT_STATUS = ["Draft", "Imported", "Modified", "Structured", "Archived"]
 STRUCTURED_REVIEW_STATUS = ["Proposed", "Modified", "Approved", "Rejected", "Need Clarification"]
 RECORD_REVIEW_STATUS = ["Draft", "Modified", "Confirmed", "Rejected", "Needs Discussion"]
+TEST_CASE_REVIEW_STATUS = ["Proposed", "Modified", "Approved", "Rejected", "Need Clarification"]
+TEST_CASE_STATUS = ["Draft", "Ready", "Blocked", "Deprecated"]
+EXECUTION_TYPES = ["Manual", "Automated"]
 PRIORITY_LEVELS = ["High", "Medium", "Low"]
 RISK_LEVELS = ["High", "Medium", "Low"]
 COVERAGE_CATEGORIES = ["Input", "Boundary", "Logic", "State", "Error", "Performance", "UI"]
@@ -97,6 +100,7 @@ class CoverageItem:
     risk_level: str = "Medium"
     review_status: str = "Draft"
     last_edited_by: str = "llm"
+    suite_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -113,6 +117,17 @@ class StrategyItem:
 
 
 @dataclass
+class TestSuite:
+    suite_id: str
+    name: str
+    priority: str = "Medium"
+    requirement_ids: List[str] = field(default_factory=list)
+    selected_techniques: List[str] = field(default_factory=list)
+    notes: str = ""
+    last_edited_by: str = "system"
+
+
+@dataclass
 class AuditEntry:
     log_id: str
     timestamp: str
@@ -124,6 +139,29 @@ class AuditEntry:
     new_value: str | None
     changed_by: str
     reason: str
+
+
+@dataclass
+class TestCase:
+    test_case_id: str
+    requirement_id: str
+    coverage_id: str
+    strategy_id: str
+    title: str
+    objective: str
+    technique: str
+    suite_ids: List[str] = field(default_factory=list)
+    preconditions: List[str] = field(default_factory=list)
+    test_data: Dict[str, Any] = field(default_factory=dict)
+    steps: List[str] = field(default_factory=list)
+    expected_result: List[str] = field(default_factory=list)
+    priority: str = "Medium"
+    execution_type: str = "Manual"
+    status: str = "Not Run"
+    review_status: str = "Proposed"
+    last_edited_by: str = "rule"
+    source_coverage_title: str = ""
+    source_strategy_notes: str = ""
 
 
 def utc_now_iso() -> str:
@@ -142,8 +180,11 @@ def empty_project_state() -> Dict[str, Any]:
         "requirements": [],
         "parsed_requirements": [],
         "risk_items": [],
+        "test_suites": [],
         "coverage_items": [],
         "strategy_items": [],
+        "test_cases": [],
+        "traceability_matrix": [],
         "audit_log": [],
     }
 

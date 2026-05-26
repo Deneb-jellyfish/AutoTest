@@ -5,9 +5,25 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
+from core.data_model import PRIORITY_LEVELS, TestSuite, dataclass_to_dict
 from core.llm_client import LlmClient, load_config
-from core.risk_engine import build_risk_item, calculate_risk_score, compute_risk_level
-from core.state_manager import find_requirement, find_risk_by_req_id, generate_risk_id, get_state, save_state
+from core.risk_engine import build_risk_item
+from core.state_manager import (
+    find_requirement,
+    find_risk_by_req_id,
+    generate_risk_id,
+    generate_suite_id,
+    get_state,
+    save_state,
+)
+from core.test_suite_manager import (
+    SUITE_TECHNIQUE_LABELS,
+    ensure_default_test_suites,
+    infer_suite_techniques,
+    sync_coverage_suite_ids,
+    technique_internal_from_labels,
+    technique_labels_from_internal,
+)
 from utils.change_tracker import log_change
 from utils.ui import apply_reference_theme, render_hero, render_workflow_sidebar
 
@@ -65,11 +81,42 @@ def generate_or_update_risk(ps: Dict[str, Any], requirement: Dict[str, Any], par
     return record["risk_id"]
 
 
+def switch_page_safe(target: str, fallback_message: str) -> None:
+    if hasattr(st, "switch_page"):
+        st.switch_page(target)
+    else:
+        st.success(fallback_message)
+
+
+def suite_priority_from_requirements(ps: Dict[str, Any], requirement_ids: List[str]) -> str:
+    risk_map = {item.get("req_id"): item for item in ps.get("risk_items", [])}
+    levels = [risk_map.get(req_id, {}).get("risk_level", "Medium") for req_id in requirement_ids]
+    if "High" in levels:
+        return "High"
+    if "Medium" in levels:
+        return "Medium"
+    return "Low"
+
+
+def delete_suite(ps: Dict[str, Any], suite_id: str) -> None:
+    ps["test_suites"] = [item for item in ps.get("test_suites", []) if item.get("suite_id") != suite_id]
+    for coverage_item in ps.get("coverage_items", []):
+        coverage_item["suite_ids"] = [item for item in coverage_item.get("suite_ids", []) if item != suite_id]
+    for test_case in ps.get("test_cases", []):
+        test_case["suite_ids"] = [item for item in test_case.get("suite_ids", []) if item != suite_id]
+
+
+st.set_page_config(page_title="Risk Assessment", layout="wide", page_icon=":triangular_flag_on_post:")
 apply_reference_theme()
 
 ps = get_state()
 use_llm = bool(st.session_state.get("use_llm", False))
 llm_client = LlmClient(load_config())
+
+auto_changed = ensure_default_test_suites(ps)
+auto_changed = sync_coverage_suite_ids(ps) or auto_changed
+if auto_changed:
+    save_state(ps)
 
 with st.sidebar:
     render_workflow_sidebar("Risk Assessment")
@@ -77,198 +124,261 @@ with st.sidebar:
 render_hero(
     "Risk-Based Prioritization",
     "Risk Assessment",
-    "Score the approved structured requirements, review rationale, and lock down the priorities that deserve the most test depth.",
+    "Keep the risk view on the left, then shape suite-level test planning on the right before diving into coverage design.",
 )
 
 parsed_requirements = [item for item in ps["parsed_requirements"] if item.get("review_status") == "Approved"]
 risk_items = ps["risk_items"]
 
-high_count = len([item for item in risk_items if item.get("risk_level") == "High"])
-medium_count = len([item for item in risk_items if item.get("risk_level") == "Medium"])
-low_count = len([item for item in risk_items if item.get("risk_level") == "Low"])
-
-sum1, sum2, sum3 = st.columns(3)
-with sum1:
-    st.metric("高风险", high_count)
-with sum2:
-    st.metric("中风险", medium_count)
-with sum3:
-    st.metric("低风险", low_count)
-
-st.subheader("风险矩阵热力图")
-st.markdown(render_risk_matrix(risk_items), unsafe_allow_html=True)
-
-if st.button("批量生成所有风险项", type="secondary"):
-    st.session_state["confirm_batch_risk"] = True
-
-if st.session_state.get("confirm_batch_risk"):
-    st.info("将对所有 `Approved` 的结构化需求生成风险项，并跳过已 Confirmed 的风险记录。再次点击确认。")
-    if st.button("确认批量生成风险项", key="confirm_batch_risk_btn", type="secondary"):
-        generated = 0
-        skipped = 0
-        for parsed_req in parsed_requirements:
-            requirement = find_requirement(ps, parsed_req["req_id"])
-            existing = find_risk_by_req_id(ps, parsed_req["req_id"])
-            if existing and existing.get("review_status") == "Confirmed":
-                skipped += 1
-                continue
-            generate_or_update_risk(ps, requirement, parsed_req, use_llm, llm_client)
-            generated += 1
-        save_state(ps)
-        st.session_state["confirm_batch_risk"] = False
-        st.success(f"已生成/更新 {generated} 条风险项，跳过 {skipped} 条")
-        st.rerun()
-
-ranked_requirements = []
+eligible_requirements: List[tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any] | None]] = []
 for parsed_req in parsed_requirements:
     requirement = find_requirement(ps, parsed_req["req_id"])
-    risk = find_risk_by_req_id(ps, parsed_req["req_id"])
-    score = risk.get("risk_score", 0) if risk else 0
-    level = risk.get("risk_level", "Draft") if risk else "Draft"
-    ranked_requirements.append((score, f"{requirement['req_id']} - {requirement['title']} [{level} / {score}分]", requirement["req_id"]))
-ranked_requirements.sort(key=lambda item: item[0], reverse=True)
+    if requirement is None:
+        continue
+    risk_item = find_risk_by_req_id(ps, parsed_req["req_id"])
+    eligible_requirements.append((int(risk_item.get("risk_score", 0)) if risk_item else 0, requirement, parsed_req, risk_item))
+eligible_requirements.sort(key=lambda item: item[0], reverse=True)
 
-if not ranked_requirements:
-    st.info("还没有可评估的需求。先去 Structured Requirement Review 页面批准至少一条结构化需求。")
-    st.stop()
+left_col, right_col = st.columns([1.05, 0.95], gap="large")
 
-labels = [item[1] for item in ranked_requirements]
-label_to_req_id = {item[1]: item[2] for item in ranked_requirements}
-selected_label = st.selectbox("需求列表（按风险分降序）", labels)
-selected_req_id = label_to_req_id[selected_label]
+with left_col:
+    high_count = len([item for item in risk_items if item.get("risk_level") == "High"])
+    medium_count = len([item for item in risk_items if item.get("risk_level") == "Medium"])
+    low_count = len([item for item in risk_items if item.get("risk_level") == "Low"])
 
-selected_requirement = find_requirement(ps, selected_req_id)
-selected_parsed = next(item for item in parsed_requirements if item["req_id"] == selected_req_id)
-selected_risk = find_risk_by_req_id(ps, selected_req_id)
+    stat1, stat2, stat3 = st.columns(3)
+    with stat1:
+        st.metric("High Risk", high_count)
+    with stat2:
+        st.metric("Medium Risk", medium_count)
+    with stat3:
+        st.metric("Low Risk", low_count)
 
-if st.button("生成当前需求的风险评估"):
-    generate_or_update_risk(ps, selected_requirement, selected_parsed, use_llm, llm_client)
-    save_state(ps)
-    st.success("风险评估已生成")
-    st.rerun()
+    st.markdown("### Risk Heatmap")
+    st.markdown(render_risk_matrix(risk_items), unsafe_allow_html=True)
 
-if selected_risk is None:
-    st.info("当前需求还没有风险评估。")
-    st.stop()
+    if st.button("Batch Generate All Risks", type="secondary", use_container_width=True):
+        st.session_state["confirm_batch_risk"] = True
 
-is_locked = selected_risk.get("review_status") == "Confirmed"
-if is_locked:
-    st.warning("⚠️ 此风险评估已确认，字段只读。如需修改，请先降级为 Draft。")
-
-st.subheader("风险详情编辑器")
-st.text_area("需求原文（只读）", value=selected_requirement["raw_text"], height=120, disabled=True)
-title = st.text_input("风险标题", value=selected_risk.get("risk_title", ""), disabled=is_locked)
-summary = st.text_area("风险摘要", value=selected_risk.get("risk_summary", ""), height=100, disabled=is_locked)
-
-impact = st.slider(
-    "影响程度 Impact",
-    1,
-    5,
-    value=int(selected_risk.get("impact", 2)),
-    help="出错后对用户或系统的影响有多严重",
-    disabled=is_locked,
-)
-likelihood = st.slider(
-    "出错可能 Likelihood",
-    1,
-    5,
-    value=int(selected_risk.get("likelihood", 2)),
-    help="这个功能出现 bug 的可能性有多大",
-    disabled=is_locked,
-)
-complexity = st.slider(
-    "实现复杂度 Complexity",
-    1,
-    5,
-    value=int(selected_risk.get("complexity", 2)),
-    help="实现和测试这个功能的难度",
-    disabled=is_locked,
-)
-usage_freq = st.slider(
-    "使用频率 Usage Frequency",
-    1,
-    5,
-    value=int(selected_risk.get("usage_frequency", 2)),
-    help="用户使用这个功能的频率",
-    disabled=is_locked,
-)
-
-risk_score = calculate_risk_score(impact, likelihood, complexity, usage_freq)
-risk_level = compute_risk_level(risk_score)
-level_icon = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}[risk_level]
-st.metric("风险总分", f"{risk_score}", f"{level_icon} {risk_level}")
-
-with st.expander("LLM / 规则引擎评分理由", expanded=True):
-    st.write(selected_risk.get("rationale", ""))
-
-if selected_risk.get("evidence_keywords"):
-    st.write("触发关键词：", "  ".join(f"`{item}`" for item in selected_risk["evidence_keywords"]))
-
-mitigation_hint = st.text_area("缓解建议", value=selected_risk.get("mitigation_hint", ""), height=100, disabled=is_locked)
-change_reason = st.text_input("修改原因（保存时必填）", key=f"risk_reason_{selected_risk['risk_id']}")
-
-if is_locked:
-    if st.button("降级为 Draft 并编辑"):
-        if not change_reason.strip():
-            st.error("请先填写修改原因")
-        else:
-            old_record = deepcopy(selected_risk)
-            selected_risk["review_status"] = "Draft"
-            selected_risk["last_edited_by"] = "human"
-            log_change(ps, "risk", selected_risk["risk_id"], "Modified", "review_status", old_record["review_status"], "Draft", "human", change_reason)
+    if st.session_state.get("confirm_batch_risk"):
+        st.warning("This will generate or refresh risk items for all approved structured requirements and skip already confirmed records.")
+        if st.button("Confirm Batch Risk Generation", key="confirm_batch_risk_btn", type="secondary", use_container_width=True):
+            generated = 0
+            skipped = 0
+            for _, requirement, parsed_req, risk_item in eligible_requirements:
+                if risk_item and risk_item.get("review_status") == "Confirmed":
+                    skipped += 1
+                    continue
+                generate_or_update_risk(ps, requirement, parsed_req, use_llm, llm_client)
+                generated += 1
             save_state(ps)
-            st.success("已降级为 Draft，现在可以编辑")
+            st.session_state["confirm_batch_risk"] = False
+            st.success(f"Generated or updated {generated} risk items, skipped {skipped} confirmed items.")
             st.rerun()
 
-btn1, btn2, btn3 = st.columns(3)
-save_clicked = btn1.button("Save", type="primary", disabled=is_locked)
-confirm_clicked = btn2.button("Confirm", disabled=is_locked)
-reject_clicked = btn3.button("Reject", disabled=is_locked)
+    if not eligible_requirements:
+        st.info("No approved structured requirements yet. Approve requirements first, then come back for risk and suite planning.")
+        st.stop()
 
-regen_label = "强制重新生成（会覆盖确认结果）" if is_locked else "重新生成"
-if st.button(regen_label, type="secondary"):
-    if is_locked:
-        st.session_state["confirm_force_regen_risk"] = True
-    else:
+    labels = []
+    label_map: Dict[str, tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any] | None]] = {}
+    for score, requirement, parsed_req, risk_item in eligible_requirements:
+        level = risk_item.get("risk_level", "Draft") if risk_item else "Draft"
+        label = f"{requirement['req_id']} - {requirement['title']} [{level} / {score}]"
+        labels.append(label)
+        label_map[label] = (requirement, parsed_req, risk_item)
+
+    st.markdown("### Requirements (Sorted by Risk)")
+    selected_label = st.selectbox("Requirement List", labels)
+    selected_requirement, selected_parsed, selected_risk = label_map[selected_label]
+
+    if st.button("Generate Risk for Current Requirement", use_container_width=True):
         generate_or_update_risk(ps, selected_requirement, selected_parsed, use_llm, llm_client)
         save_state(ps)
-        st.success("风险评估已重新生成")
+        st.success("Risk assessment generated.")
         st.rerun()
 
-if st.session_state.get("confirm_force_regen_risk"):
-    st.warning("再次点击确认会覆盖当前 Confirmed 风险评估。")
-    if st.button("确认强制重新生成风险评估", key="force_regen_risk"):
-        generate_or_update_risk(ps, selected_requirement, selected_parsed, use_llm, llm_client)
-        save_state(ps)
-        st.session_state["confirm_force_regen_risk"] = False
-        st.success("已强制覆盖风险评估")
-        st.rerun()
-
-if save_clicked or confirm_clicked or reject_clicked:
-    if not change_reason.strip():
-        st.error("请填写修改原因后再保存")
+    if selected_risk is None:
+        st.info("This requirement does not have a risk item yet. Generate one first.")
     else:
-        old_record = deepcopy(selected_risk)
-        selected_risk["risk_title"] = title.strip()
-        selected_risk["risk_summary"] = summary.strip()
-        selected_risk["impact"] = impact
-        selected_risk["likelihood"] = likelihood
-        selected_risk["complexity"] = complexity
-        selected_risk["usage_frequency"] = usage_freq
-        selected_risk["risk_score"] = risk_score
-        selected_risk["risk_level"] = risk_level
-        selected_risk["mitigation_hint"] = mitigation_hint.strip()
-        selected_risk["last_edited_by"] = "human"
+        st.markdown("### Risk Detail")
+        st.caption(selected_parsed.get("summary") or selected_requirement.get("raw_text", ""))
+        st.write(f"Title: {selected_risk.get('risk_title', '')}")
+        st.write(f"Summary: {selected_risk.get('risk_summary', '')}")
+        st.metric("Risk Score", int(selected_risk.get("risk_score", 0)), selected_risk.get("risk_level", "Medium"))
+        with st.expander("Rationale", expanded=False):
+            st.write(selected_risk.get("rationale", ""))
 
-        action = "Edited"
-        if confirm_clicked:
-            selected_risk["review_status"] = "Confirmed"
-            action = "Confirmed"
-        elif reject_clicked:
-            selected_risk["review_status"] = "Rejected"
-            action = "Rejected"
+with right_col:
+    st.markdown(
+        """
+        <style>
+        .stMultiSelect [data-baseweb="tag"],
+        .stMultiSelect [data-baseweb="tag"] > div,
+        .stMultiSelect [data-baseweb="tag"] > span {
+            background: #FFF5DA !important;
+            color: #6a4b1a !important;
+            border: 1px solid rgba(168, 102, 31, 0.18) !important;
+        }
+        .stMultiSelect [data-baseweb="tag"] span,
+        .stMultiSelect [data-baseweb="tag"] svg {
+            color: #6a4b1a !important;
+            fill: #6a4b1a !important;
+        }
+        .stMultiSelect [data-baseweb="tag"] svg *,
+        .stMultiSelect [data-baseweb="tag"] path {
+            fill: #6a4b1a !important;
+            stroke: #6a4b1a !important;
+        }
+        .stForm {
+            background: rgba(255, 248, 220, 0.9);
+            border: 1px solid rgba(168, 102, 31, 0.12);
+            border-radius: 22px;
+            padding: 0.85rem 0.85rem 0.35rem 0.85rem;
+        }
+        .stForm .stButton > button[kind="primary"],
+        .stForm button[kind="primary"],
+        .stForm button[type="submit"],
+        [data-testid="stFormSubmitButton"] > button,
+        [data-testid="stFormSubmitButton"] button {
+            background: linear-gradient(180deg, #f7d58f 0%, #efc46f 100%) !important;
+            color: #53381b !important;
+            border: 1px solid rgba(168, 102, 31, 0.18) !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stFormSubmitButton"] > button:hover,
+        [data-testid="stFormSubmitButton"] button:hover,
+        .stForm button[kind="primary"]:hover,
+        .stForm button[type="submit"]:hover {
+            background: linear-gradient(180deg, #f5ce7d 0%, #e9bc5f 100%) !important;
+            color: #452c13 !important;
+        }
+        .stButton > button {
+            white-space: nowrap !important;
+            font-size: 0.95rem !important;
+            line-height: 1.1 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        log_change(ps, "risk", selected_risk["risk_id"], action, "record", old_record, selected_risk, "human", change_reason)
+    st.markdown("### High-level Test Suite Design")
+    st.caption("Auto-suggested suites can be edited before coverage planning. The design here will drive later coverage and case views.")
+
+    all_requirement_options = {
+        f"{item['req_id']} - {item['title']}": item["req_id"]
+        for item in ps.get("requirements", [])
+    }
+
+    sorted_suites = sorted(
+        ps.get("test_suites", []),
+        key=lambda item: (
+            ["High", "Medium", "Low"].index(item.get("priority", "Medium")) if item.get("priority", "Medium") in PRIORITY_LEVELS else 1,
+            item.get("suite_id", ""),
+        ),
+    )
+
+    for suite in sorted_suites:
+        requirement_labels = [req_id for req_id in suite.get("requirement_ids", [])]
+        technique_labels = technique_labels_from_internal(suite.get("selected_techniques", []))
+
+        with st.container(border=True):
+            top1, top2, top3 = st.columns([2.0, 0.8, 0.8])
+            with top1:
+                st.markdown(f"**{suite['suite_id']}  {suite['name']}**")
+                st.caption(f"[{suite.get('priority', 'Medium')}]")
+            with top2:
+                edit_clicked = st.button("编辑", key=f"edit_suite_{suite['suite_id']}", use_container_width=True)
+            with top3:
+                delete_clicked = st.button("删除", key=f"delete_suite_{suite['suite_id']}", use_container_width=True)
+
+            st.write("关联需求：", " ".join(requirement_labels) or "None")
+            st.write("预选技术：", ", ".join(technique_labels) or "None")
+
+            if delete_clicked:
+                delete_suite(ps, suite["suite_id"])
+                log_change(ps, "test_suite", suite["suite_id"], "Deleted", "record", suite, None, "human", "Deleted from suite design")
+                save_state(ps)
+                st.rerun()
+
+            if edit_clicked or st.session_state.get("editing_suite_id") == suite["suite_id"]:
+                st.session_state["editing_suite_id"] = suite["suite_id"]
+                with st.form(f"suite_form_{suite['suite_id']}"):
+                    suite_name = st.text_input("套件名称", value=suite.get("name", ""))
+                    priority = st.selectbox(
+                        "优先级",
+                        PRIORITY_LEVELS,
+                        index=PRIORITY_LEVELS.index(suite.get("priority", "Medium")) if suite.get("priority", "Medium") in PRIORITY_LEVELS else 1,
+                    )
+                    selected_requirement_labels = st.multiselect(
+                        "关联需求",
+                        options=list(all_requirement_options.keys()),
+                        default=[label for label, req_id in all_requirement_options.items() if req_id in suite.get("requirement_ids", [])],
+                    )
+                    selected_technique_labels = st.multiselect(
+                        "预选技术",
+                        options=SUITE_TECHNIQUE_LABELS,
+                        default=technique_labels,
+                    )
+                    notes = st.text_area("备注", value=suite.get("notes", ""), height=90)
+                    submitted = st.form_submit_button("保存", type="primary", use_container_width=True)
+
+                if submitted:
+                    old_value = deepcopy(suite)
+                    suite["name"] = suite_name.strip() or suite["suite_id"]
+                    suite["priority"] = priority
+                    suite["requirement_ids"] = [all_requirement_options[label] for label in selected_requirement_labels]
+                    suite["selected_techniques"] = technique_internal_from_labels(selected_technique_labels)
+                    suite["notes"] = notes.strip()
+                    suite["last_edited_by"] = "human"
+                    log_change(ps, "test_suite", suite["suite_id"], "Edited", "record", old_value, suite, "human", "Edited suite design")
+                    save_state(ps)
+                    st.session_state["editing_suite_id"] = None
+                    st.rerun()
+
+    if st.button("+ 新增套件", type="secondary", use_container_width=True):
+        st.session_state["editing_suite_id"] = "__new_suite__"
+
+    if st.session_state.get("editing_suite_id") == "__new_suite__":
+        suggested_requirements = [item["req_id"] for _, item, _, _ in eligible_requirements[:3]]
+        with st.form("new_suite_form"):
+            suite_name = st.text_input("套件名称", value="New Test Suite")
+            priority = st.selectbox("优先级", PRIORITY_LEVELS, index=1)
+            selected_requirement_labels = st.multiselect(
+                "关联需求",
+                options=list(all_requirement_options.keys()),
+                default=[label for label, req_id in all_requirement_options.items() if req_id in suggested_requirements],
+            )
+            selected_technique_labels = st.multiselect(
+                "预选技术",
+                options=SUITE_TECHNIQUE_LABELS,
+                default=infer_suite_techniques(ps, suggested_requirements),
+            )
+            notes = st.text_area("备注", height=90)
+            submitted = st.form_submit_button("保存", type="primary", use_container_width=True)
+
+        if submitted:
+            requirement_ids = [all_requirement_options[label] for label in selected_requirement_labels]
+            new_suite = dataclass_to_dict(
+                TestSuite(
+                    suite_id=generate_suite_id(ps),
+                    name=suite_name.strip() or "New Test Suite",
+                    priority=priority or suite_priority_from_requirements(ps, requirement_ids),
+                    requirement_ids=requirement_ids,
+                    selected_techniques=technique_internal_from_labels(selected_technique_labels),
+                    notes=notes.strip(),
+                    last_edited_by="human",
+                )
+            )
+            ps["test_suites"].append(new_suite)
+            log_change(ps, "test_suite", new_suite["suite_id"], "Created", "record", None, new_suite, "human", "Created new suite")
+            save_state(ps)
+            st.session_state["editing_suite_id"] = None
+            st.rerun()
+
+    if st.button("确认套件设计", type="primary", use_container_width=True):
+        sync_coverage_suite_ids(ps)
         save_state(ps)
-        st.success(f"{selected_risk['risk_id']} 已保存")
-        st.rerun()
+        st.session_state["active_suite_id"] = ps["test_suites"][0]["suite_id"] if ps.get("test_suites") else ""
+        switch_page_safe("pages/4_Coverage_Planning.py", "套件设计已确认，请前往 Coverage & Strategy 页面继续。")

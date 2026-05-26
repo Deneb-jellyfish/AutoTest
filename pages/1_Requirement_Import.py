@@ -68,6 +68,41 @@ def import_requirement_rows(ps: Dict[str, Any], rows: List[Dict[str, Any]], sour
     return imported
 
 
+def find_requirement_record(ps: Dict[str, Any], requirement_id: str) -> Dict[str, Any] | None:
+    for item in ps["requirements"]:
+        if item.get("requirement_id", item.get("req_id")) == requirement_id:
+            return item
+    return None
+
+
+def delete_requirement_cascade(ps: Dict[str, Any], requirement_id: str) -> None:
+    parsed_ids = {
+        item["parsed_id"]
+        for item in ps["parsed_requirements"]
+        if item.get("requirement_id", item.get("req_id")) == requirement_id
+    }
+    risk_ids = {
+        item["risk_id"]
+        for item in ps["risk_items"]
+        if item.get("req_id") == requirement_id
+    }
+    cov_ids = {
+        item["cov_id"]
+        for item in ps["coverage_items"]
+        if item.get("req_id") == requirement_id or item.get("risk_id") in risk_ids or item.get("parsed_id") in parsed_ids
+    }
+
+    ps["requirements"] = [
+        item for item in ps["requirements"] if item.get("requirement_id", item.get("req_id")) != requirement_id
+    ]
+    ps["parsed_requirements"] = [
+        item for item in ps["parsed_requirements"] if item.get("requirement_id", item.get("req_id")) != requirement_id
+    ]
+    ps["risk_items"] = [item for item in ps["risk_items"] if item.get("req_id") != requirement_id]
+    ps["coverage_items"] = [item for item in ps["coverage_items"] if item.get("cov_id") not in cov_ids]
+    ps["strategy_items"] = [item for item in ps["strategy_items"] if item.get("cov_id") not in cov_ids]
+
+
 def sync_batch_structured_results(ps: Dict[str, Any], parsed_records: List[Dict[str, Any]]) -> tuple[int, int]:
     updated = 0
     skipped = 0
@@ -84,8 +119,7 @@ def sync_batch_structured_results(ps: Dict[str, Any], parsed_records: List[Dict[
             existing["parsed_id"] = old_value["parsed_id"]
             log_change(ps, "parsed_req", existing["parsed_id"], "Regenerated", "record", old_value, existing, "llm", "Batch structure from import page")
         else:
-            if not record.get("parsed_id"):
-                record["parsed_id"] = generate_parsed_id(ps)
+            record["parsed_id"] = generate_parsed_id(ps)
             ps["parsed_requirements"].append(record)
             log_change(ps, "parsed_req", record["parsed_id"], "Created", "record", None, record, "llm", "Batch structure from import page")
         updated += 1
@@ -301,4 +335,104 @@ else:
                 "raw_text": item.get("raw_text", ""),
             }
         )
-    st.dataframe(pd.DataFrame(requirement_rows), use_container_width=True, hide_index=True)
+    edited_requirements_df = st.data_editor(
+        pd.DataFrame(requirement_rows),
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        disabled=["requirement_id", "source"],
+        column_config={
+            "requirement_id": st.column_config.TextColumn("requirement_id"),
+            "title": st.column_config.TextColumn("title", required=True),
+            "priority": st.column_config.SelectboxColumn("priority", options=PRIORITY_LEVELS, required=True),
+            "review_status": st.column_config.SelectboxColumn("review_status", options=RAW_REQUIREMENT_STATUS, required=True),
+            "source": st.column_config.TextColumn("source"),
+            "raw_text": st.column_config.TextColumn("raw_text", required=True, width="large"),
+        },
+        key="current_requirements_editor",
+    )
+
+    save_col, delete_col = st.columns([1, 1])
+    with save_col:
+        if st.button("Save Requirement Table", type="primary", use_container_width=True):
+            edited_rows = edited_requirements_df.to_dict(orient="records")
+            validation_errors: List[str] = []
+            for row in edited_rows:
+                row_errors = validate_requirement(str(row.get("title", "")), str(row.get("raw_text", "")))
+                if row_errors:
+                    validation_errors.extend([f"{row.get('requirement_id', '')}: {error}" for error in row_errors])
+
+            if validation_errors:
+                for error in validation_errors:
+                    st.error(error)
+            else:
+                edited_count = 0
+                for row in edited_rows:
+                    requirement_id = str(row.get("requirement_id", "")).strip()
+                    selected_requirement = find_requirement_record(ps, requirement_id)
+                    if selected_requirement is None:
+                        continue
+                    normalized_priority = str(row.get("priority", "Medium")).strip()
+                    normalized_status = str(row.get("review_status", "Imported")).strip()
+                    new_value = deepcopy(selected_requirement)
+                    new_value["title"] = str(row.get("title", "")).strip()
+                    new_value["priority"] = normalized_priority if normalized_priority in PRIORITY_LEVELS else "Medium"
+                    new_value["review_status"] = normalized_status if normalized_status in RAW_REQUIREMENT_STATUS else "Imported"
+                    new_value["raw_text"] = str(row.get("raw_text", "")).strip()
+
+                    if new_value != selected_requirement:
+                        old_value = deepcopy(selected_requirement)
+                        selected_requirement.update(new_value)
+                        log_change(
+                            ps,
+                            "requirement",
+                            requirement_id,
+                            "Edited",
+                            "record",
+                            old_value,
+                            selected_requirement,
+                            "human",
+                            "Edited from current requirements table",
+                        )
+                        edited_count += 1
+
+                save_state(ps)
+                st.success(f"已保存需求表，共更新 {edited_count} 条 requirement。")
+                st.rerun()
+
+    with delete_col:
+        req_options = {
+            f"{item['requirement_id']} - {item['title']}": item["requirement_id"]
+            for item in requirement_rows
+        }
+        delete_label = st.selectbox(
+            "Delete requirement",
+            options=list(req_options.keys()),
+            key="delete_requirement_select",
+            label_visibility="collapsed",
+        )
+        if st.button("Delete Selected Requirement", type="secondary", use_container_width=True):
+            st.session_state["confirm_delete_requirement_id"] = req_options[delete_label]
+
+    selected_requirement_id = st.session_state.get("confirm_delete_requirement_id")
+    selected_requirement = find_requirement_record(ps, selected_requirement_id) if selected_requirement_id else None
+    if selected_requirement is not None:
+        st.warning("再次点击确认后，会删除该 requirement 以及关联的结构化、风险、覆盖和策略数据。")
+        if st.button("Confirm Delete Requirement", key=f"confirm_delete_{selected_requirement_id}", type="secondary"):
+            old_value = deepcopy(selected_requirement)
+            delete_requirement_cascade(ps, selected_requirement_id)
+            log_change(
+                ps,
+                "requirement",
+                selected_requirement_id,
+                "Deleted",
+                "record",
+                old_value,
+                None,
+                "human",
+                "Deleted from current requirements table",
+            )
+            st.session_state.pop("confirm_delete_requirement_id", None)
+            save_state(ps)
+            st.success(f"{selected_requirement_id} 已删除")
+            st.rerun()

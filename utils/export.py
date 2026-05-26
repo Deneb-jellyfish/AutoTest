@@ -29,5 +29,6 @@ def export_project_excel(project_state: Dict[str, Any]) -> bytes:
         _frame(project_state.get("risk_items", [])).to_excel(writer, sheet_name="risk_items", index=False)
         _frame(project_state.get("coverage_items", [])).to_excel(writer, sheet_name="coverage_items", index=False)
         _frame(project_state.get("strategy_items", [])).to_excel(writer, sheet_name="strategy_items", index=False)
+        _frame(project_state.get("test_cases", [])).to_excel(writer, sheet_name="test_cases", index=False)
         _frame(project_state.get("audit_log", [])).to_excel(writer, sheet_name="audit_log", index=False)
     return buffer.getvalue()
