@@ -1,0 +1,72 @@
+# 仅供参考：后端配置项说明，供阅读源码时对照。
+# 接口测试请直接调用服务器 API（见 README），无需本地启动后端。
+
+spring:
+  application:
+    name: auth-sut
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/auth_sut?currentSchema=public&stringtype=unspecified&TimeZone=Asia/Shanghai
+    username: your-postgres-user
+    password: your-postgres-password
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      timeout: 10000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+        shutdown-timeout: 200ms
+
+  mail:
+    host: smtp.example.com
+    port: 465
+    username: your-mail-username
+    password: your-mail-password
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+            required: true
+          starttls:
+            enable: false
+            required: false
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/**/*.xml
+  type-aliases-package: com.zdmj
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+server:
+  port: 8081
+
+api:
+  prefix: /api/zdmj
+
+jwt:
+  secret: change-me-to-a-long-random-secret
+  expire-days: 7
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.zdmj: DEBUG
